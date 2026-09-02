@@ -21,6 +21,39 @@ import { logger } from '../../utils/logger.js';
 // --- 配置常量 ---
 const TARGET_URL = 'https://gemini.google.com/app?hl=en';
 
+async function clickGeminiSend(page, inputLocator, sendBtnLocator, meta = {}) {
+    const waitForEnabled = async (locator, timeout = 5000) => {
+        await locator.waitFor({ state: 'visible', timeout });
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+            if (await locator.isEnabled().catch(() => false)) return;
+            await sleep(100, 150);
+        }
+        throw new Error('send button disabled');
+    };
+
+    const candidates = [
+        sendBtnLocator.last(),
+        page.getByRole('button', { name: /send message|send|submit/i }).last(),
+        page.locator('button[aria-label*="Send"], button[aria-label*="Submit"]').last(),
+        page.locator('button:has(mat-icon)').filter({ hasText: /send/i }).last()
+    ];
+
+    for (const locator of candidates) {
+        try {
+            await waitForEnabled(locator);
+            await locator.click({ force: true, timeout: 5000 });
+            return;
+        } catch (e) {
+            logger.debug('适配器', `发送按钮点击候选失败: ${e.message}`, meta);
+        }
+    }
+
+    logger.warn('适配器', '发送按钮点击失败，尝试键盘 Enter 发送', meta);
+    await safeClick(page, inputLocator, { bias: 'input', timeout: 5000 });
+    await page.keyboard.press('Enter');
+}
+
 
 /**
  * 执行生图任务
@@ -41,12 +74,15 @@ async function generate(context, prompt, imgPaths, modelId, meta = {}) {
         logger.info('适配器', '开启新会话...', meta);
         await gotoWithCheck(page, TARGET_URL);
 
-        try {
-            logger.debug('适配器', '尝试点击 Temporary chat...', meta);
-            const tempChatBtn = page.getByRole('button', { name: 'Temporary chat' });
-            await safeClick(page, tempChatBtn, { bias: 'button', timeout: 3000 });
-        } catch (e) {
-            logger.debug('适配器', '未找到 Temporary chat 按钮或点击失败，忽略', meta);
+        const useTempChat = config?.backend?.adapter?.gemini?.temporaryChat || false;
+        if (useTempChat) {
+            try {
+                logger.debug('适配器', '尝试点击 Temporary chat...', meta);
+                const tempChatBtn = page.getByRole('button', { name: 'Temporary chat' });
+                await safeClick(page, tempChatBtn, { bias: 'button', timeout: 3000 });
+            } catch (e) {
+                logger.debug('适配器', '未找到 Temporary chat 按钮或点击失败，忽略', meta);
+            }
         }
 
         // 1. 等待输入框加载
@@ -117,7 +153,7 @@ async function generate(context, prompt, imgPaths, modelId, meta = {}) {
 
         // 7. 发送提示词
         logger.info('适配器', '发送提示词...', meta);
-        await safeClick(page, sendBtnLocator, { bias: 'button' });
+        await clickGeminiSend(page, inputLocator, sendBtnLocator, meta);
 
         logger.info('适配器', '等待生成结果...', meta);
 
@@ -225,6 +261,17 @@ export const manifest = {
     id: 'gemini',
     displayName: 'Google Gemini (图片、视频生成)',
     description: '使用 Google Gemini 官网生成图片和视频，支持参考图片上传。需要已登录的 Google 账户，免费账户图片生成有速率限制，视频生成必须为会员账户才可使用。',
+
+    // 配置项模式
+    configSchema: [
+        {
+            key: 'temporaryChat',
+            label: '临时对话',
+            type: 'boolean',
+            default: false,
+            note: '开启后将使用临时对话模式'
+        }
+    ],
 
     // 入口 URL
     getTargetUrl(config, workerConfig) {
